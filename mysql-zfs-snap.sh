@@ -39,8 +39,6 @@ CUT=`which cut`
 TR=`which tr`
 MYSQL=`which mysql`
 ECHO=`which echo`
-REV=`which rev`
-FLOCK=`which flock`
 
 # set default values
 DEFAULTOPT=
@@ -82,12 +80,9 @@ do
         esac
 done
 
-lockfile=`$ECHO $socket | $REV | $CUT -d"/" -f1 | $REV`
-lockfile="/var/lock/${lockfile}.lck"
-
 #Sanity check
 if [ ! -z $filesystem ]; then
-	checkfs=`${ZFS} list -t snapshot -o name | ${GREP} -c $filesystem`
+	checkfs=`${ZFS} list -o name | ${EGREP} -c "^${filesystem}$"`
 	if [ "$checkfs" -eq "0" ]; then
 	        ${ECHO} "Invalid filesystem"
 		exit 1
@@ -126,11 +121,6 @@ if [ -n "$DEFAULTOPT" ]; then
         esac
 fi
 
-(
-
-#Let aquire the lock for monitoring
-$FLOCK -x 200
-
 # do the snapshot dance
 if [ "$vflag" ]; then
         echo "Calling flush table and doing ${ZFS} snapshot $filesystem@$LABELPREFIX-$LABEL"
@@ -140,38 +130,16 @@ if [ "$pflag" ]; then
         echo "Flushing mysql tables"
 else
 
-	ddllock=`$MYSQL -N -u $mysql_user -p$password -S $socket  -e "show processlist;"| grep -ci "killing slave"`
-	if [ "$ddllock" -eq "0" ]; then
-	#no ddl lock
-
-                $MYSQL -N -u $mysql_user -p$password -S $socket <<EOF
-stop slave SQL_THREAD;
-EOF
-
-                sleep 60  # Hopefully SQL thread will be done.  This is needed because of 
-			  # bug 45940, sql may hang waiting for event in a trx involving innodb _and_ myisam
-
-  		$MYSQL -N -u $mysql_user -p$password -S $socket > /${filesystem}/snap_master_pos.out <<EOF
-stop slave;
+  	$MYSQL -N -n -u $mysql_user -p$password -S $socket > /${filesystem}/snap_master_pos.out <<EOF
+flush tables with read lock;
 flush logs;
 show master status;
-EOF
-
-  		sync
-
-  		$MYSQL -N -u $mysql_user -p$password -S $socket  <<EOF
-flush tables with read lock;
+\! sync
 \! ${ZFS} snapshot $filesystem@$LABELPREFIX-$LABEL
-start slave;
 EOF
 
-		if [ "$vflag" ]; then
-        		echo "Snapshot taken"
-		fi
-	else
-		if [ "$vflag" ]; then
-                        echo "Snapshot blocked by running DDL"
-                fi
+	if [ "$vflag" ]; then
+       		echo "Snapshot taken"
 	fi
 fi
 
@@ -201,4 +169,3 @@ else
         fi
 fi
 
-) 200>$lockfile 
